@@ -249,7 +249,7 @@ export default function Home() {
               >
                 Tier {tier}
                 {!unlocked && <span className="text-gray-600 font-normal ml-1">(Round {tier * 3})</span>}
-                {unlocked && tier >= 3 && <span className="text-gray-600 font-normal ml-1">· {TIER_COLORS[tier]}</span>}
+                {unlocked && tier >= 3 && <span className="font-normal ml-1" style={{ color: TIER_COLORS[tier] }}>●</span>}
               </div>
               {unlocked && tierMuts.map(m => {
                 const lvl = humanMutations.get(m.id) ?? 0;
