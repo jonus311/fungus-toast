@@ -1,5 +1,5 @@
 import {
-  BOARD_SIZE, TOTAL_TILES, CellType, MutationId, MUTATIONS, MutationTier,
+  BOARD_SIZE, TOTAL_TILES, CellType, MutationId, MUTATIONS, MutationTier, MutationDef,
   BASE_GROWTH_CHANCE, BASE_RANDOM_DECAY_CHANCE, AGE_DECAY_START,
   AGE_DEATH_FACTOR_PER_CYCLE, TOTAL_GROWTH_CYCLES, GAME_END_OCCUPANCY,
   STARTING_MUTATION_POINTS, MAX_ROUNDS, TOXIN_DURATION,
@@ -12,11 +12,17 @@ import {
 export interface Cell {
   type: CellType;
   owner: number;       // -1 = none
-  lastOwner: number;   // -1 = none; tracks original owner for dead cells (reclaiming)
-  age: number;         // growth cycles alive
+  lastOwner: number;   // -1 = none
+  age: number;
   resistant: boolean;
   toxinAge: number;    // when toxin expires (growth cycles)
   birthRound: number;
+  isNew?: boolean;     // for animation: was placed this cycle
+}
+
+export interface SurgeState {
+  turnsRemaining: number;
+  level: number;
 }
 
 export interface Player {
@@ -28,9 +34,16 @@ export interface Player {
   fractionalPoints: number;
   territory: number;
   aiStrategy?: 'growth' | 'toxin' | 'balanced';
-  surgeActive: number;                // Hyphal Surge rounds remaining
-  mimeticSurgeActive: number;         // Mimetic Resilience rounds remaining
-  competitiveSurgeActive: number;     // Competitive Antagonism rounds remaining
+  surgePoints: number;
+  activeSurges: Map<MutationId, SurgeState>;
+  catabolismMpThisRound: number;
+}
+
+export interface RoundStats {
+  cellsGained: Map<number, number>;
+  cellsLost: Map<number, number>;
+  cellsKilled: Map<number, number>;
+  toxinsPlaced: Map<number, number>;
 }
 
 export interface GameState {
@@ -44,6 +57,8 @@ export interface GameState {
   winner: number;
   log: string[];
   necrophyticBloomActivated: boolean;
+  roundStats: RoundStats;
+  history: Uint8Array[]; // snapshots for replay
 }
 
 // ===================== HELPERS =====================
@@ -88,6 +103,11 @@ function getMutLevel(player: Player, id: MutationId): number {
   return player.mutations.get(id) ?? 0;
 }
 
+function isSurgeActive(player: Player, id: MutationId): boolean {
+  const s = player.activeSurges.get(id);
+  return s !== undefined && s.turnsRemaining > 0;
+}
+
 function shuffle<T>(arr: T[]): T[] {
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -96,15 +116,32 @@ function shuffle<T>(arr: T[]): T[] {
   return arr;
 }
 
+function addLog(state: GameState, msg: string) {
+  state.log.push(msg);
+  if (state.log.length > 200) state.log.shift();
+}
+
+function incStat(map: Map<number, number>, key: number, amount: number = 1) {
+  map.set(key, (map.get(key) ?? 0) + amount);
+}
+
 // ===================== INIT =====================
+
+function createRoundStats(): RoundStats {
+  return {
+    cellsGained: new Map(), cellsLost: new Map(),
+    cellsKilled: new Map(), toxinsPlaced: new Map(),
+  };
+}
 
 export function createInitialState(): GameState {
   const board: Cell[] = new Array(TOTAL_TILES);
   for (let i = 0; i < TOTAL_TILES; i++) board[i] = createEmptyCell();
   return {
     board, players: [], round: 1, growthCycle: 0,
-    phase: 'setup', speed: 1, endgameCountdown: -1, winner: -1, log: [],
-    necrophyticBloomActivated: false,
+    phase: 'setup', speed: 1, endgameCountdown: -1, winner: -1,
+    log: [], necrophyticBloomActivated: false,
+    roundStats: createRoundStats(), history: [],
   };
 }
 
@@ -112,8 +149,8 @@ export function addPlayer(state: GameState, name: string, isHuman: boolean, stra
   const p: Player = {
     id: state.players.length, name, isHuman,
     mutations: new Map(), mutationPoints: STARTING_MUTATION_POINTS, fractionalPoints: 0,
-    territory: 0, aiStrategy: strategy, surgeActive: 0,
-    mimeticSurgeActive: 0, competitiveSurgeActive: 0,
+    territory: 0, aiStrategy: strategy, surgePoints: 0,
+    activeSurges: new Map(), catabolismMpThisRound: 0,
   };
   state.players.push(p);
   return p;
@@ -124,9 +161,58 @@ export function placeStartingSpore(state: GameState, playerId: number, x: number
   if (state.board[i].type !== CellType.Empty) return false;
   state.board[i] = {
     type: CellType.Alive, owner: playerId, lastOwner: playerId,
-    age: 0, resistant: true, toxinAge: 0, birthRound: state.round,
+    age: 0, resistant: true, toxinAge: 0, birthRound: state.round, isNew: true,
   };
   return true;
+}
+
+// ===================== SURGE POINT SYSTEM =====================
+
+function getSurgeActivationCost(def: MutationDef, level: number): number {
+  return (def.surgePointCost ?? 5) + (level - 1) * (def.surgePointIncreasePerLevel ?? 1);
+}
+
+/** Accumulate surge points from territory each round */
+function accumulateSurgePoints(state: GameState) {
+  for (const player of state.players) {
+    // Points from territory: 1 point per 400 living cells
+    const livingCount = player.territory;
+    const pointsFromTerritory = Math.floor(livingCount / 400);
+    // Base 1 point per round + territory bonus
+    player.surgePoints += 1 + pointsFromTerritory;
+  }
+}
+
+/** Try to activate surges for all players */
+export function activateSurges(state: GameState) {
+  accumulateSurgePoints(state);
+
+  for (const player of state.players) {
+    // Tick down active surges
+    for (const [id, surge] of player.activeSurges) {
+      surge.turnsRemaining--;
+      if (surge.turnsRemaining <= 0) {
+        player.activeSurges.delete(id);
+      }
+    }
+
+    // Try to activate surges that have enough points
+    const surgeMutations = MUTATIONS.filter(m => m.isSurge);
+    for (const def of surgeMutations) {
+      const level = getMutLevel(player, def.id);
+      if (level <= 0) continue;
+      if (isSurgeActive(player, def.id)) continue;
+      const cost = getSurgeActivationCost(def, level);
+      if (player.surgePoints >= cost) {
+        player.surgePoints -= cost;
+        player.activeSurges.set(def.id, {
+          turnsRemaining: def.surgeDuration ?? 2,
+          level,
+        });
+        addLog(state, `${player.name}'s ${def.name} surge activated!`);
+      }
+    }
+  }
 }
 
 // ===================== GROWTH MECHANICS =====================
@@ -134,7 +220,7 @@ export function placeStartingSpore(state: GameState, playerId: number, x: number
 function getGrowthChance(player: Player): number {
   let chance = BASE_GROWTH_CHANCE;
   chance += getMutLevel(player, MutationId.MycelialBloom) * 0.0025;
-  if (player.surgeActive > 0)
+  if (isSurgeActive(player, MutationId.HyphalSurge))
     chance += getMutLevel(player, MutationId.HyphalSurge) * 0.009;
   return chance;
 }
@@ -147,7 +233,11 @@ function getDecayResistance(player: Player): number {
   return getMutLevel(player, MutationId.HomeostaticHarmony) * 0.003;
 }
 
-/** Mycotropic Induction: bonus growth chance when adjacent to enemy cells */
+function getAgeDecayStart(player: Player): number {
+  const chronoLevel = getMutLevel(player, MutationId.ChronoresilientCytoplasm);
+  return (AGE_DECAY_START + chronoLevel * 4) * TOTAL_GROWTH_CYCLES;
+}
+
 function getMycotropicBonus(player: Player, cellIdx: number, board: Cell[]): number {
   const level = getMutLevel(player, MutationId.MycotropicInduction);
   if (level <= 0) return 0;
@@ -155,8 +245,7 @@ function getMycotropicBonus(player: Player, cellIdx: number, board: Cell[]): num
   for (const ni of neighbors) {
     const nc = board[ni];
     if (nc.type === CellType.Alive && nc.owner !== player.id) {
-      // Has at least one enemy neighbor — apply bonus multiplier to base growth
-      return level * 0.25; // multiplicative fraction applied to growth chance
+      return level * 0.25;
     }
   }
   return 0;
@@ -165,6 +254,11 @@ function getMycotropicBonus(player: Player, cellIdx: number, board: Cell[]): num
 export function runGrowthCycle(state: GameState) {
   const { board, players } = state;
   const newCells: { idx: number; owner: number }[] = [];
+
+  // Clear isNew flags from previous cycle
+  for (let i = 0; i < TOTAL_TILES; i++) {
+    if (board[i].isNew) board[i].isNew = false;
+  }
 
   // Collect living cells per player
   const livingByPlayer = new Map<number, number[]>();
@@ -176,6 +270,11 @@ export function runGrowthCycle(state: GameState) {
     }
   }
 
+  // Mycotoxin Catabolism: clean enemy toxins pre-growth
+  for (const player of players) {
+    applyMycotoxinCatabolism(state, player, livingByPlayer.get(player.id) ?? []);
+  }
+
   for (const [playerId, cells] of livingByPlayer) {
     const player = players[playerId];
     const baseGrowth = getGrowthChance(player);
@@ -183,12 +282,12 @@ export function runGrowthCycle(state: GameState) {
     const toxinLevel = getMutLevel(player, MutationId.MycotoxinTracer);
     const creepingLevel = getMutLevel(player, MutationId.CreepingMold);
     const moveChance = creepingLevel * 0.035;
+    const potentiationKillChance = getMutLevel(player, MutationId.MycotoxinPotentiation) * 0.016;
 
     for (const ci of cells) {
       const mycotropicMult = 1 + getMycotropicBonus(player, ci, board);
       const growthChance = baseGrowth * mycotropicMult;
 
-      // Orthogonal growth
       const ortho = getOrthoNeighbors(ci);
       let grew = false;
       for (const ni of ortho) {
@@ -200,10 +299,23 @@ export function runGrowthCycle(state: GameState) {
           } else if (toxinLevel > 0) {
             const toxinChance = toxinLevel * 0.013 * 0.1;
             if (Math.random() < toxinChance) {
+              const potDuration = TOXIN_DURATION + getMutLevel(player, MutationId.MycotoxinPotentiation);
               board[ni] = {
                 type: CellType.Toxin, owner: playerId, lastOwner: -1,
-                age: 0, resistant: false, toxinAge: TOXIN_DURATION, birthRound: state.round,
+                age: 0, resistant: false, toxinAge: potDuration, birthRound: state.round,
               };
+              incStat(state.roundStats.toxinsPlaced, playerId);
+            }
+          }
+        }
+        // Mycotoxin Potentiation: toxins adjacent to living cells have kill chance
+        if (nc.type === CellType.Toxin && nc.owner === playerId && potentiationKillChance > 0) {
+          for (const tni of getOrthoNeighbors(ni)) {
+            const tnc = board[tni];
+            if (tnc.type === CellType.Alive && tnc.owner !== playerId && Math.random() < potentiationKillChance) {
+              // Use a temporary deaths map for potentiation kills
+              const tempDeaths = new Map<number, number>();
+              killCell(state, tni, tempDeaths, playerId);
             }
           }
         }
@@ -219,26 +331,41 @@ export function runGrowthCycle(state: GameState) {
         }
       }
 
-      // Creeping Mold: try to move cell to a better position
+      // Creeping Mold
       if (creepingLevel > 0 && !grew && Math.random() < moveChance) {
         tryCreepingMoldMove(board, ci, player, creepingLevel);
       }
 
-      // Necrohyphal Infiltration: try to convert adjacent dead enemy cells
+      // Necrohyphal Infiltration
       if (!grew) {
         tryNecrohyphalInfiltration(board, ci, player);
       }
     }
   }
 
-  // Apply new cells (shuffle for fairness)
+  // Apply Hyphal Vectoring surge
+  for (const player of players) {
+    if (isSurgeActive(player, MutationId.HyphalVectoring) && state.growthCycle === 0) {
+      applyHyphalVectoring(state, player);
+    }
+  }
+
+  // Apply Chitin Fortification surge
+  for (const player of players) {
+    if (isSurgeActive(player, MutationId.ChitinFortification) && state.growthCycle === 0) {
+      applyChitinFortification(state, player);
+    }
+  }
+
+  // Apply new cells
   shuffle(newCells);
   for (const { idx: ni, owner } of newCells) {
     if (board[ni].type === CellType.Empty) {
       board[ni] = {
         type: CellType.Alive, owner, lastOwner: owner,
-        age: 0, resistant: false, toxinAge: 0, birthRound: state.round,
+        age: 0, resistant: false, toxinAge: 0, birthRound: state.round, isNew: true,
       };
+      incStat(state.roundStats.cellsGained, owner);
     }
   }
 
@@ -251,12 +378,124 @@ export function runGrowthCycle(state: GameState) {
   state.growthCycle++;
 }
 
-/** Creeping Mold: move cell to adjacent empty tile with more open neighbors */
+// ===================== HYPHAL VECTORING =====================
+
+function applyHyphalVectoring(state: GameState, player: Player) {
+  const level = getMutLevel(player, MutationId.HyphalVectoring);
+  if (level <= 0) return;
+  const totalTiles = 3 + level;
+  const centerX = BOARD_SIZE / 2, centerY = BOARD_SIZE / 2;
+
+  // Find frontier cells (living cells with at least one empty neighbor)
+  const frontier: number[] = [];
+  for (let i = 0; i < TOTAL_TILES; i++) {
+    if (state.board[i].type === CellType.Alive && state.board[i].owner === player.id) {
+      const neighbors = getOrthoNeighbors(i);
+      if (neighbors.some(ni => state.board[ni].type === CellType.Empty || (state.board[ni].type === CellType.Alive && state.board[ni].owner !== player.id))) {
+        frontier.push(i);
+      }
+    }
+  }
+  if (frontier.length === 0) return;
+
+  // Pick the frontier cell closest to center with fewest friendly cells in path
+  let bestCell = frontier[0];
+  let bestScore = Infinity;
+  const checkCount = Math.min(50, frontier.length);
+  const shuffled = shuffle([...frontier]).slice(0, checkCount);
+  for (const ci of shuffled) {
+    const cx = idxX(ci), cy = idxY(ci);
+    const dist = Math.hypot(cx - centerX, cy - centerY);
+    if (dist < bestScore) {
+      bestScore = dist;
+      bestCell = ci;
+    }
+  }
+
+  // Grow a line toward center
+  const sx = idxX(bestCell), sy = idxY(bestCell);
+  const dx = Math.sign(centerX - sx);
+  const dy = Math.sign(centerY - sy);
+  let cx = sx, cy = sy;
+  let placed = 0;
+
+  for (let i = 0; i < totalTiles; i++) {
+    cx += dx;
+    cy += dy;
+    if (cx < 0 || cx >= BOARD_SIZE || cy < 0 || cy >= BOARD_SIZE) break;
+    const ti = idx(cx, cy);
+    const tc = state.board[ti];
+    if (tc.type === CellType.Alive && tc.owner === player.id) continue; // skip own cells
+    // Overwrite everything else
+    state.board[ti] = {
+      type: CellType.Alive, owner: player.id, lastOwner: player.id,
+      age: 0, resistant: false, toxinAge: 0, birthRound: state.round, isNew: true,
+    };
+    placed++;
+    incStat(state.roundStats.cellsGained, player.id);
+  }
+  if (placed > 0) {
+    addLog(state, `${player.name}'s Hyphal Vectoring grew ${placed} cells!`);
+  }
+}
+
+// ===================== CHITIN FORTIFICATION =====================
+
+function applyChitinFortification(state: GameState, player: Player) {
+  const level = getMutLevel(player, MutationId.ChitinFortification);
+  if (level <= 0) return;
+
+  const livingCells: number[] = [];
+  for (let i = 0; i < TOTAL_TILES; i++) {
+    if (state.board[i].type === CellType.Alive && state.board[i].owner === player.id && !state.board[i].resistant) {
+      livingCells.push(i);
+    }
+  }
+  const count = Math.min(level, livingCells.length);
+  shuffle(livingCells);
+  for (let i = 0; i < count; i++) {
+    state.board[livingCells[i]].resistant = true;
+  }
+}
+
+// ===================== MYCOTOXIN CATABOLISM =====================
+
+function applyMycotoxinCatabolism(state: GameState, player: Player, livingCells: number[]) {
+  const level = getMutLevel(player, MutationId.MycotoxinCatabolism);
+  if (level <= 0) return;
+
+  player.catabolismMpThisRound = 0;
+  const cleanupChance = level * 0.032;
+  const mpChance = level * 0.08;
+  const processed = new Set<number>();
+
+  for (const ci of livingCells) {
+    for (const ni of getOrthoNeighbors(ci)) {
+      if (processed.has(ni)) continue;
+      const nc = state.board[ni];
+      if (nc.type === CellType.Toxin && nc.owner !== player.id) {
+        processed.add(ni);
+        if (Math.random() < cleanupChance) {
+          state.board[ni] = createEmptyCell();
+          // MP chance
+          if (player.catabolismMpThisRound < 3 && Math.random() < mpChance) {
+            player.mutationPoints += 1;
+            player.catabolismMpThisRound++;
+          }
+        }
+      }
+    }
+  }
+  if (processed.size > 0 && player.catabolismMpThisRound > 0) {
+    addLog(state, `${player.name}'s Catabolism cleaned toxins, earned ${player.catabolismMpThisRound} MP`);
+  }
+}
+
+// ===================== CREEPING MOLD =====================
+
 function tryCreepingMoldMove(board: Cell[], ci: number, player: Player, level: number) {
   const ortho = getOrthoNeighbors(ci);
   const sourceOpen = ortho.filter(n => board[n].type === CellType.Empty).length;
-  
-  // At max level, can jump over toxins
   const maxLevel = level >= 4;
 
   const candidates: number[] = [];
@@ -268,7 +507,6 @@ function tryCreepingMoldMove(board: Cell[], ci: number, player: Player, level: n
         candidates.push(ni);
       }
     } else if (maxLevel && board[ni].type === CellType.Toxin) {
-      // Jump over toxin
       const dx = idxX(ni) - idxX(ci);
       const dy = idxY(ni) - idxY(ci);
       const jx = idxX(ni) + dx, jy = idxY(ni) + dy;
@@ -287,7 +525,6 @@ function tryCreepingMoldMove(board: Cell[], ci: number, player: Player, level: n
   if (candidates.length === 0) return;
 
   const target = candidates[Math.floor(Math.random() * candidates.length)];
-  // Move: copy cell to target, clear source
   const src = board[ci];
   board[target] = {
     type: CellType.Alive, owner: src.owner, lastOwner: src.owner,
@@ -296,7 +533,8 @@ function tryCreepingMoldMove(board: Cell[], ci: number, player: Player, level: n
   board[ci] = createEmptyCell();
 }
 
-/** Necrohyphal Infiltration: convert adjacent dead enemy cells */
+// ===================== NECROHYPHAL INFILTRATION =====================
+
 function tryNecrohyphalInfiltration(board: Cell[], ci: number, player: Player) {
   const level = getMutLevel(player, MutationId.NecrohyphalInfiltration);
   if (level <= 0) return;
@@ -309,9 +547,7 @@ function tryNecrohyphalInfiltration(board: Cell[], ci: number, player: Player) {
     const nc = board[ni];
     if (nc.type === CellType.Dead && nc.lastOwner !== -1 && nc.lastOwner !== player.id) {
       if (Math.random() < baseChance) {
-        // Convert to player's living cell
         reclaimCell(board, ni, player.id);
-        // Cascade
         cascadeInfiltration(board, ni, player.id, cascadeChance, new Set([ni]));
         return;
       }
@@ -340,7 +576,7 @@ function cascadeInfiltration(board: Cell[], fromIdx: number, playerId: number, c
 function reclaimCell(board: Cell[], i: number, playerId: number) {
   board[i] = {
     type: CellType.Alive, owner: playerId, lastOwner: playerId,
-    age: 0, resistant: false, toxinAge: 0, birthRound: 0,
+    age: 0, resistant: false, toxinAge: 0, birthRound: 0, isNew: true,
   };
 }
 
@@ -351,7 +587,6 @@ export function runDecayPhase(state: GameState) {
   const additionalDecay = round >= DECAY_SCALING_START_ROUND
     ? (round - DECAY_SCALING_START_ROUND + 1) * DECAY_ADDITIONAL_PER_ROUND : 0;
 
-  // Count living cells per player (needed for several mutations)
   const livingCounts = new Map<number, number>();
   for (let i = 0; i < TOTAL_TILES; i++) {
     if (board[i].type === CellType.Alive) {
@@ -359,16 +594,15 @@ export function runDecayPhase(state: GameState) {
     }
   }
 
-  // Track deaths per player this round for Necrophytic Bloom
   const deathsThisRound = new Map<number, number>();
 
-  // === Pre-decay: Putrefactive Mycotoxin kills ===
+  // Putrefactive Mycotoxin kills
   applyPutrefactiveMycotoxin(state, livingCounts, deathsThisRound);
 
-  // === Pre-decay: Sporicidal Bloom ===
+  // Sporicidal Bloom
   applySporicidalBloom(state, livingCounts);
 
-  // === Main decay ===
+  // Main decay
   for (let i = 0; i < TOTAL_TILES; i++) {
     const cell = board[i];
     if (cell.type === CellType.Alive && !cell.resistant) {
@@ -377,9 +611,10 @@ export function runDecayPhase(state: GameState) {
       const chitinLevel = getMutLevel(player, MutationId.ChitinFortification);
       if (chitinLevel > 0 && cell.age <= 3 * TOTAL_GROWTH_CYCLES) continue;
 
+      const ageThreshold = getAgeDecayStart(player);
       let decayChance = BASE_RANDOM_DECAY_CHANCE + additionalDecay - resistance;
-      if (cell.age > AGE_DECAY_START * TOTAL_GROWTH_CYCLES) {
-        const excessAge = cell.age - AGE_DECAY_START * TOTAL_GROWTH_CYCLES;
+      if (cell.age > ageThreshold) {
+        const excessAge = cell.age - ageThreshold;
         decayChance += excessAge * AGE_DEATH_FACTOR_PER_CYCLE;
       }
 
@@ -390,30 +625,40 @@ export function runDecayPhase(state: GameState) {
 
     // Expire toxins
     if (cell.type === CellType.Toxin && cell.age >= cell.toxinAge) {
-      // Catabolic Rebirth: before clearing, check adjacent dead cells
       applyCatabolicRebirth(state, i);
       board[i] = createEmptyCell();
     }
   }
 
-  // === Post-decay: Regenerative Hyphae ===
+  // Regenerative Hyphae
   applyRegenerativeHyphae(state);
 
-  // === Post-decay: Necrophytic Bloom ===
+  // Necrophytic Bloom
   applyNecrophyticBloom(state, deathsThisRound);
+
+  // Log round stats
+  for (const p of players) {
+    const gained = state.roundStats.cellsGained.get(p.id) ?? 0;
+    const lost = state.roundStats.cellsLost.get(p.id) ?? 0;
+    const killed = state.roundStats.cellsKilled.get(p.id) ?? 0;
+    if (gained > 10 || lost > 10 || killed > 5) {
+      addLog(state, `R${round} ${p.name}: +${gained} -${lost} killed:${killed}`);
+    }
+  }
 }
 
-/** Kill a cell and trigger death-related mutations */
 function killCell(state: GameState, i: number, deathsThisRound: Map<number, number>, killerPlayerId?: number) {
   const cell = state.board[i];
   const ownerId = cell.owner;
   cell.type = CellType.Dead;
   cell.lastOwner = ownerId;
-  // age keeps ticking for dead cells (visual decay)
 
   deathsThisRound.set(ownerId, (deathsThisRound.get(ownerId) ?? 0) + 1);
+  incStat(state.roundStats.cellsLost, ownerId);
+  if (killerPlayerId !== undefined && killerPlayerId >= 0) {
+    incStat(state.roundStats.cellsKilled, killerPlayerId);
+  }
 
-  // Necrosporulation: chance to spawn spore on random empty tile
   const player = state.players[ownerId];
   if (player) {
     const necroLevel = getMutLevel(player, MutationId.Necrosporulation);
@@ -422,33 +667,27 @@ function killCell(state: GameState, i: number, deathsThisRound: Map<number, numb
     }
   }
 
-  // Necrotoxic Conversion: killer reclaims the dead cell
   if (killerPlayerId !== undefined && killerPlayerId >= 0) {
     const killer = state.players[killerPlayerId];
     if (killer) {
       const ntcLevel = getMutLevel(killer, MutationId.NecrotoxicConversion);
       if (ntcLevel > 0 && Math.random() < ntcLevel * 0.04) {
         reclaimCell(state.board, i, killerPlayerId);
-        return; // cell reclaimed, skip further effects
+        return;
       }
     }
-
-    // Putrefactive Rejuvenation: reduce age of nearby friendly cells
     applyPutrefactiveRejuvenation(state, i, killerPlayerId);
-
-    // Putrefactive Cascade: chain kills
     applyPutrefactiveCascade(state, i, killerPlayerId, deathsThisRound);
   }
 }
 
 function spawnSporeOnRandomEmpty(state: GameState, playerId: number) {
-  // Pick a random tile; if empty, place spore. Try a few times.
   for (let attempt = 0; attempt < 5; attempt++) {
     const ti = Math.floor(Math.random() * TOTAL_TILES);
     if (state.board[ti].type === CellType.Empty) {
       state.board[ti] = {
         type: CellType.Alive, owner: playerId, lastOwner: playerId,
-        age: 0, resistant: false, toxinAge: 0, birthRound: state.round,
+        age: 0, resistant: false, toxinAge: 0, birthRound: state.round, isNew: true,
       };
       return;
     }
@@ -459,7 +698,6 @@ function spawnSporeOnRandomEmpty(state: GameState, playerId: number) {
 
 function applyPutrefactiveMycotoxin(state: GameState, livingCounts: Map<number, number>, deathsThisRound: Map<number, number>) {
   const { board, players } = state;
-  // For each living cell, check if adjacent enemy has Putrefactive Mycotoxin
   const toKill: { idx: number; killerPlayerId: number }[] = [];
 
   for (let i = 0; i < TOTAL_TILES; i++) {
@@ -477,7 +715,6 @@ function applyPutrefactiveMycotoxin(state: GameState, livingCounts: Map<number, 
         const pmLevel = getMutLevel(enemy, MutationId.PutrefactiveMycotoxin);
         if (pmLevel > 0) {
           let effect = pmLevel * 0.015;
-          // Putrefactive Cascade effectiveness bonus
           const cascadeLevel = getMutLevel(enemy, MutationId.PutrefactiveCascade);
           effect += cascadeLevel * 0.004;
           totalChance += effect;
@@ -487,7 +724,6 @@ function applyPutrefactiveMycotoxin(state: GameState, livingCounts: Map<number, 
     }
 
     if (totalChance > 0 && Math.random() < totalChance) {
-      // Determine killer proportionally
       const roll = Math.random() * totalChance;
       let sum = 0;
       let killer = attackers[0].playerId;
@@ -518,12 +754,11 @@ function applySporicidalBloom(state: GameState, livingCounts: Map<number, number
     const sporesToDrop = Math.floor(myLiving * level * 0.08);
     if (sporesToDrop <= 0) continue;
 
-    // Find available tiles (not owned by this player)
     const available: number[] = [];
     for (let i = 0; i < TOTAL_TILES; i++) {
       const c = board[i];
       if (c.owner !== player.id || c.type === CellType.Empty) {
-        if (!(c.type === CellType.Alive && c.owner === player.id) && 
+        if (!(c.type === CellType.Alive && c.owner === player.id) &&
             !(c.type === CellType.Dead && c.lastOwner === player.id)) {
           available.push(i);
         }
@@ -531,24 +766,30 @@ function applySporicidalBloom(state: GameState, livingCounts: Map<number, number
     }
     if (available.length === 0) continue;
 
-    const toxinLife = SPORICIDAL_TOXIN_DURATION;
+    const toxinLife = SPORICIDAL_TOXIN_DURATION + getMutLevel(player, MutationId.MycotoxinPotentiation);
+    let placed = 0;
     for (let s = 0; s < sporesToDrop; s++) {
       const ti = available[Math.floor(Math.random() * available.length)];
       const tc = board[ti];
       if (tc.type === CellType.Alive && tc.owner !== player.id) {
-        // Kill enemy and toxify
         tc.type = CellType.Toxin;
         tc.lastOwner = tc.owner;
         tc.owner = player.id;
         tc.age = 0;
         tc.toxinAge = toxinLife;
         tc.resistant = false;
+        placed++;
       } else if (tc.type === CellType.Empty || tc.type === CellType.Toxin) {
         board[ti] = {
           type: CellType.Toxin, owner: player.id, lastOwner: -1,
           age: 0, resistant: false, toxinAge: toxinLife, birthRound: state.round,
         };
+        placed++;
       }
+    }
+    if (placed > 0) {
+      incStat(state.roundStats.toxinsPlaced, player.id, placed);
+      addLog(state, `${player.name}'s Sporicidal Bloom placed ${placed} toxins`);
     }
   }
 }
@@ -563,12 +804,11 @@ function applyRegenerativeHyphae(state: GameState) {
     const baseChance = getMutLevel(player, MutationId.RegenerativeHyphae) * 0.03;
     if (baseChance <= 0) continue;
 
-    // Hypersystemic Regeneration boost
     const hyperLevel = getMutLevel(player, MutationId.HypersystemicRegeneration);
     const effectBonus = hyperLevel * 0.01;
     const enhancedChance = baseChance * (1 + effectBonus);
     const resistChance = hyperLevel * 0.15;
-    const allowDiagonal = hyperLevel >= 3; // max level
+    const allowDiagonal = hyperLevel >= 3;
 
     for (let i = 0; i < TOTAL_TILES; i++) {
       const cell = board[i];
@@ -582,7 +822,6 @@ function applyRegenerativeHyphae(state: GameState) {
           attempted.add(ni);
           if (Math.random() < enhancedChance) {
             reclaimCell(board, ni, player.id);
-            // Hypersystemic resistance
             if (resistChance > 0 && Math.random() < resistChance) {
               board[ni].resistant = true;
             }
@@ -622,7 +861,7 @@ function applyPutrefactiveRejuvenation(state: GameState, deathIdx: number, kille
   if (level <= 0) return;
 
   const baseRadius = 3;
-  const radius = level >= 4 ? baseRadius * 3 : baseRadius; // max level = 3x radius
+  const radius = level >= 4 ? baseRadius * 3 : baseRadius;
   const ageReduction = level * 4;
   const cx = idxX(deathIdx), cy = idxY(deathIdx);
 
@@ -630,7 +869,7 @@ function applyPutrefactiveRejuvenation(state: GameState, deathIdx: number, kille
     for (let dx = -radius; dx <= radius; dx++) {
       const nx = cx + dx, ny = cy + dy;
       if (nx < 0 || nx >= BOARD_SIZE || ny < 0 || ny >= BOARD_SIZE) continue;
-      if (Math.abs(dx) + Math.abs(dy) > radius) continue; // Manhattan distance
+      if (Math.abs(dx) + Math.abs(dy) > radius) continue;
       const ni = idx(nx, ny);
       const nc = state.board[ni];
       if (nc.type === CellType.Alive && nc.owner === killerPlayerId) {
@@ -656,10 +895,7 @@ function applyPutrefactiveCascade(state: GameState, deathIdx: number, killerPlay
     if (Math.random() >= cascadeChance) continue;
     const nc = state.board[ni];
     if (nc.type !== CellType.Alive || nc.owner === killerPlayerId) continue;
-
-    // Kill the adjacent enemy
     killCell(state, ni, deathsThisRound, killerPlayerId);
-    // Recurse
     applyPutrefactiveCascade(state, ni, killerPlayerId, deathsThisRound, depth + 1);
   }
 }
@@ -669,7 +905,6 @@ function applyPutrefactiveCascade(state: GameState, deathIdx: number, killerPlay
 function applyNecrophyticBloom(state: GameState, deathsThisRound: Map<number, number>) {
   const { board, players } = state;
 
-  // Check activation
   if (!state.necrophyticBloomActivated) {
     let occupied = 0;
     for (let i = 0; i < TOTAL_TILES; i++) {
@@ -681,7 +916,6 @@ function applyNecrophyticBloom(state: GameState, deathsThisRound: Map<number, nu
   }
   if (!state.necrophyticBloomActivated) return;
 
-  // Damping based on occupancy
   let occupied = 0;
   for (let i = 0; i < TOTAL_TILES; i++) {
     if (board[i].type !== CellType.Empty) occupied++;
@@ -699,12 +933,17 @@ function applyNecrophyticBloom(state: GameState, deathsThisRound: Map<number, nu
     const totalSpores = sporesPerDeath * deaths;
     if (totalSpores <= 0) continue;
 
+    let reclaims = 0;
     for (let s = 0; s < totalSpores; s++) {
       const ti = Math.floor(Math.random() * TOTAL_TILES);
       const tc = board[ti];
       if (tc.type === CellType.Dead && tc.lastOwner !== player.id) {
         reclaimCell(board, ti, player.id);
+        reclaims++;
       }
+    }
+    if (reclaims > 0) {
+      addLog(state, `${player.name}'s Necrophytic Bloom spawned ${reclaims} spores!`);
     }
   }
 }
@@ -714,7 +953,6 @@ function applyNecrophyticBloom(state: GameState, deathsThisRound: Map<number, nu
 export function earnMutationPoints(state: GameState) {
   const { players } = state;
 
-  // Count living cells for Anabolic Inversion
   const livingCounts = new Map<number, number>();
   for (let i = 0; i < TOTAL_TILES; i++) {
     if (state.board[i].type === CellType.Alive) {
@@ -736,7 +974,20 @@ export function earnMutationPoints(state: GameState) {
       player.fractionalPoints -= bonus;
     }
 
-    // Anabolic Inversion: bonus when losing
+    // Adaptive Expression
+    const aeLevel = getMutLevel(player, MutationId.AdaptiveExpression);
+    if (aeLevel > 0) {
+      const aeChance = aeLevel * 0.19;
+      if (Math.random() < aeChance) {
+        points += 1;
+        const secondChance = aeLevel * 0.14;
+        if (Math.random() < secondChance) {
+          points += 1;
+        }
+      }
+    }
+
+    // Anabolic Inversion
     const anabolicLevel = getMutLevel(player, MutationId.AnabolicInversion);
     if (anabolicLevel > 0) {
       const myLiving = livingCounts.get(player.id) ?? 0;
@@ -749,7 +1000,6 @@ export function earnMutationPoints(state: GameState) {
       if (maxEnemyLiving > myLiving && myLiving > 0) {
         const gap = (maxEnemyLiving - myLiving) / maxEnemyLiving;
         const bonusWeight = gap * anabolicLevel * 0.30;
-        // Weighted random bonus 0-4 based on gap
         const roll = Math.random() * bonusWeight;
         let anabolicBonus = 0;
         if (roll > 0.6) anabolicBonus = 4;
@@ -760,7 +1010,7 @@ export function earnMutationPoints(state: GameState) {
       }
     }
 
-    // Hyperadaptive Drift: free mutation upgrades
+    // Hyperadaptive Drift
     const hyperDriftLevel = getMutLevel(player, MutationId.HyperadaptiveDrift);
     if (hyperDriftLevel > 0) {
       applyHyperadaptiveDrift(player, hyperDriftLevel, state.round);
@@ -781,29 +1031,26 @@ export function earnMutationPoints(state: GameState) {
 function applyHyperadaptiveDrift(player: Player, level: number, currentRound: number) {
   const higherTierChance = level * 0.28;
 
-  // Find upgradeable mutations
   const tier1Pool: MutationId[] = [];
   const higherPool: MutationId[] = [];
   for (const m of MUTATIONS) {
     const cur = getMutLevel(player, m.id);
     if (cur >= m.maxLevel) continue;
     if (!isTierUnlocked(m.tier, currentRound)) continue;
+    if (m.isSurge) continue; // Surges can't be auto-upgraded
     if (m.tier === 1) tier1Pool.push(m.id);
     else if (m.tier >= 2 && m.tier <= 4) higherPool.push(m.id);
   }
 
   if (tier1Pool.length === 0 && higherPool.length === 0) return;
 
-  // Try for higher tier upgrade
   if (Math.random() < higherTierChance && higherPool.length > 0) {
     const pick = higherPool[Math.floor(Math.random() * higherPool.length)];
     player.mutations.set(pick, (player.mutations.get(pick) ?? 0) + 1);
   } else if (tier1Pool.length > 0) {
-    // Free tier 1 upgrade
     const pick = tier1Pool[Math.floor(Math.random() * tier1Pool.length)];
     player.mutations.set(pick, (player.mutations.get(pick) ?? 0) + 1);
     
-    // Bonus: chance for additional tier 1
     const bonusChance = level * 0.30;
     if (Math.random() < bonusChance && tier1Pool.length > 0) {
       const pick2 = tier1Pool[Math.floor(Math.random() * tier1Pool.length)];
@@ -820,12 +1067,10 @@ function applyOntogenicRegression(player: Player, level: number, currentRound: n
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (Math.random() >= chance) {
-      // Failure consolation
       player.mutationPoints += 2;
       continue;
     }
 
-    // Find tier 1 mutations with at least 3 levels
     const tier1Sources: MutationId[] = [];
     for (const m of MUTATIONS) {
       if (m.tier === 1 && getMutLevel(player, m.id) >= 3) {
@@ -837,10 +1082,9 @@ function applyOntogenicRegression(player: Player, level: number, currentRound: n
       continue;
     }
 
-    // Find tier 5-6 targets that aren't maxed
     const targets: MutationId[] = [];
     for (const m of MUTATIONS) {
-      if ((m.tier === 5 || m.tier === 6) && getMutLevel(player, m.id) < m.maxLevel && isTierUnlocked(m.tier, currentRound)) {
+      if ((m.tier === 5 || m.tier === 6) && getMutLevel(player, m.id) < m.maxLevel && isTierUnlocked(m.tier, currentRound) && !m.isSurge) {
         targets.push(m.id);
       }
     }
@@ -849,12 +1093,10 @@ function applyOntogenicRegression(player: Player, level: number, currentRound: n
       continue;
     }
 
-    // Consume 3 levels from random tier 1 mutation
     const source = tier1Sources[Math.floor(Math.random() * tier1Sources.length)];
     const currentLevel = getMutLevel(player, source);
     player.mutations.set(source, Math.max(0, currentLevel - 3));
 
-    // Grant 1 level of random tier 5-6 mutation
     const target = targets[Math.floor(Math.random() * targets.length)];
     player.mutations.set(target, (player.mutations.get(target) ?? 0) + 1);
   }
@@ -874,82 +1116,127 @@ export function upgradeMutation(player: Player, mutationId: MutationId, round: n
   return true;
 }
 
-// ===================== AI =====================
+// ===================== SMARTER AI =====================
+
+interface AIGoal {
+  id: MutationId;
+  targetLevel?: number;
+}
+
+const GROWTH_GOALS: AIGoal[] = [
+  { id: MutationId.MycelialBloom },
+  { id: MutationId.Tendrils, targetLevel: 5 },
+  { id: MutationId.CreepingMold },
+  { id: MutationId.MycotropicInduction, targetLevel: 2 },
+  { id: MutationId.RegenerativeHyphae },
+  { id: MutationId.HyphalSurge, targetLevel: 5 },
+  { id: MutationId.HyphalVectoring, targetLevel: 3 },
+  { id: MutationId.NecrohyphalInfiltration },
+  { id: MutationId.HypersystemicRegeneration },
+];
+
+const TOXIN_GOALS: AIGoal[] = [
+  { id: MutationId.MycotoxinTracer, targetLevel: 10 },
+  { id: MutationId.MycotoxinPotentiation, targetLevel: 5 },
+  { id: MutationId.PutrefactiveMycotoxin },
+  { id: MutationId.SporicidalBloom },
+  { id: MutationId.NecrotoxicConversion },
+  { id: MutationId.PutrefactiveCascade },
+  { id: MutationId.PutrefactiveRejuvenation },
+  { id: MutationId.CompetitiveAntagonism, targetLevel: 2 },
+];
+
+const BALANCED_GOALS: AIGoal[] = [
+  { id: MutationId.MycelialBloom },
+  { id: MutationId.CreepingMold },
+  { id: MutationId.Necrosporulation },
+  { id: MutationId.PutrefactiveMycotoxin },
+  { id: MutationId.NecrohyphalInfiltration },
+  { id: MutationId.CatabolicRebirth },
+  { id: MutationId.HyperadaptiveDrift },
+];
+
+function getAIGoals(strategy: string): AIGoal[] {
+  switch (strategy) {
+    case 'growth': return GROWTH_GOALS;
+    case 'toxin': return TOXIN_GOALS;
+    default: return BALANCED_GOALS;
+  }
+}
 
 export function runAIMutations(state: GameState) {
   for (const player of state.players) {
     if (player.isHuman) continue;
 
     const strategy = player.aiStrategy ?? 'balanced';
+    const goals = getAIGoals(strategy);
     let spent = 0;
-    const maxSpend = 50; // prevent infinite loop
+    const maxSpend = 80;
 
+    // Early game: prioritize economy mutations
+    if (state.round <= 10) {
+      const econMuts = [MutationId.MutatorPhenotype, MutationId.AdaptiveExpression];
+      for (const econId of econMuts) {
+        if (player.mutationPoints <= 0) break;
+        const def = MUTATIONS.find(m => m.id === econId);
+        if (!def) continue;
+        const lvl = getMutLevel(player, econId);
+        if (lvl < Math.min(3, def.maxLevel) && player.mutationPoints >= def.cost && isTierUnlocked(def.tier, state.round)) {
+          upgradeMutation(player, econId, state.round);
+          spent++;
+        }
+      }
+    }
+
+    // Work through goals sequentially
+    for (const goal of goals) {
+      if (player.mutationPoints <= 0 || spent >= maxSpend) break;
+      const def = MUTATIONS.find(m => m.id === goal.id);
+      if (!def) continue;
+      if (!isTierUnlocked(def.tier, state.round)) continue;
+      const targetLvl = goal.targetLevel ?? def.maxLevel;
+      const currentLvl = getMutLevel(player, goal.id);
+      if (currentLvl >= targetLvl) continue;
+
+      // Check if we should save for higher-tier mutation
+      if (def.cost > player.mutationPoints) {
+        // Save points for this expensive mutation if it's coming soon
+        if (def.cost <= player.mutationPoints + 3) break;
+        continue;
+      }
+
+      while (getMutLevel(player, goal.id) < targetLvl && player.mutationPoints >= def.cost && spent < maxSpend) {
+        if (!upgradeMutation(player, goal.id, state.round)) break;
+        spent++;
+      }
+    }
+
+    // Spend remaining on fallback (weighted toward strategy-relevant categories)
     while (player.mutationPoints > 0 && spent < maxSpend) {
       spent++;
-
-      // Build pool of affordable, unlocked mutations
       const affordable = MUTATIONS.filter(m => {
         const lvl = getMutLevel(player, m.id);
         return lvl < m.maxLevel && player.mutationPoints >= m.cost && isTierUnlocked(m.tier, state.round);
       });
       if (affordable.length === 0) break;
 
-      let target: MutationId | null = null;
-
-      if (strategy === 'growth') {
-        const preferred = [MutationId.MycelialBloom, MutationId.Tendrils, MutationId.HyphalSurge,
-          MutationId.HomeostaticHarmony, MutationId.MycotropicInduction, MutationId.RegenerativeHyphae,
-          MutationId.CreepingMold, MutationId.NecrohyphalInfiltration, MutationId.HypersystemicRegeneration];
-        const available = preferred.filter(id => affordable.some(m => m.id === id));
-        if (available.length > 0) target = available[Math.floor(Math.random() * available.length)];
-      } else if (strategy === 'toxin') {
-        const preferred = [MutationId.MycotoxinTracer, MutationId.PutrefactiveMycotoxin,
-          MutationId.SporicidalBloom, MutationId.NecrotoxicConversion, MutationId.PutrefactiveCascade,
-          MutationId.PutrefactiveRejuvenation, MutationId.MycelialBloom, MutationId.CompetitiveAntagonism];
-        const available = preferred.filter(id => affordable.some(m => m.id === id));
-        if (available.length > 0) target = available[Math.floor(Math.random() * available.length)];
-      }
-
-      if (!target) {
-        // Balanced or fallback: pick randomly from affordable, weighted toward lower tiers
-        const weights = affordable.map(m => 1 / m.tier);
-        const totalWeight = weights.reduce((a, b) => a + b, 0);
-        let roll = Math.random() * totalWeight;
-        for (let i = 0; i < affordable.length; i++) {
-          roll -= weights[i];
-          if (roll <= 0) { target = affordable[i].id; break; }
-        }
-        if (!target) target = affordable[0].id;
+      // Weight by strategy relevance
+      const weights = affordable.map(m => {
+        let w = 1 / m.tier;
+        if (strategy === 'growth' && (m.category === 'growth' || m.category === 'cellularResilience')) w *= 3;
+        if (strategy === 'toxin' && m.category === 'fungicide') w *= 3;
+        if (m.category === 'geneticDrift') w *= 1.5; // economy always somewhat useful
+        return w;
+      });
+      const totalWeight = weights.reduce((a, b) => a + b, 0);
+      let roll = Math.random() * totalWeight;
+      let target = affordable[0].id;
+      for (let i = 0; i < affordable.length; i++) {
+        roll -= weights[i];
+        if (roll <= 0) { target = affordable[i].id; break; }
       }
 
       upgradeMutation(player, target, state.round);
-    }
-  }
-}
-
-// ===================== SURGES =====================
-
-export function activateSurges(state: GameState) {
-  for (const player of state.players) {
-    // Hyphal Surge
-    if (player.surgeActive > 0) player.surgeActive--;
-    const surgeLevel = getMutLevel(player, MutationId.HyphalSurge);
-    if (surgeLevel > 0 && state.round % 5 === 0) {
-      player.surgeActive = 2;
-    }
-
-    // Mimetic Resilience surge
-    if (player.mimeticSurgeActive > 0) player.mimeticSurgeActive--;
-    const mimeticLevel = getMutLevel(player, MutationId.MimeticResilience);
-    if (mimeticLevel > 0 && state.round % 5 === 0) {
-      player.mimeticSurgeActive = 4;
-    }
-
-    // Competitive Antagonism surge
-    if (player.competitiveSurgeActive > 0) player.competitiveSurgeActive--;
-    const compLevel = getMutLevel(player, MutationId.CompetitiveAntagonism);
-    if (compLevel > 0 && state.round % 5 === 0) {
-      player.competitiveSurgeActive = 4;
     }
   }
 }
@@ -1016,4 +1303,23 @@ export function getAIStartingPositions(playerCount: number, humanX: number, huma
     positions.push(candidates[i]);
   }
   return positions;
+}
+
+/** Take a snapshot of the board for replay */
+export function snapshotBoard(state: GameState): Uint8Array {
+  // 2 bytes per cell: type+owner (byte1), flags (byte2)
+  const snap = new Uint8Array(TOTAL_TILES * 2);
+  for (let i = 0; i < TOTAL_TILES; i++) {
+    const c = state.board[i];
+    snap[i * 2] = (c.type << 4) | ((c.owner + 1) & 0x0F);
+    snap[i * 2 + 1] = (c.resistant ? 1 : 0) | (c.isNew ? 2 : 0);
+  }
+  return snap;
+}
+
+export function resetRoundStats(state: GameState) {
+  state.roundStats = createRoundStats();
+  for (const p of state.players) {
+    p.catabolismMpThisRound = 0;
+  }
 }

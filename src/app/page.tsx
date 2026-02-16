@@ -1,14 +1,52 @@
 'use client';
 
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { BOARD_SIZE, MUTATIONS, MutationId, PLAYER_COLORS, TOTAL_TILES, CellType, isTierUnlocked, MutationTier } from '@/game/constants';
+import {
+  BOARD_SIZE, MUTATIONS, MutationId, PLAYER_COLORS, TOTAL_TILES, CellType,
+  isTierUnlocked, MutationTier, MutationCategory, CATEGORY_LABELS, TIER_COLORS,
+} from '@/game/constants';
 import {
   GameState, createInitialState, addPlayer, placeStartingSpore,
   runGrowthCycle, runDecayPhase, earnMutationPoints, updateTerritories,
   checkEndgame, determineWinner, getAIStartingPositions, runAIMutations,
-  upgradeMutation, activateSurges,
+  upgradeMutation, activateSurges, snapshotBoard, resetRoundStats,
 } from '@/game/state';
 import { renderBoard } from '@/game/renderer';
+
+// Sound system
+class SoundEngine {
+  private ctx: AudioContext | null = null;
+  muted = false;
+
+  private getCtx(): AudioContext | null {
+    if (this.muted) return null;
+    if (!this.ctx) {
+      try { this.ctx = new AudioContext(); } catch { return null; }
+    }
+    return this.ctx;
+  }
+
+  play(freq: number, duration: number, type: OscillatorType = 'sine', volume = 0.05) {
+    const ctx = this.getCtx();
+    if (!ctx) return;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(volume, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + duration);
+  }
+
+  growth() { this.play(440, 0.08, 'sine', 0.02); }
+  death() { this.play(220, 0.12, 'triangle', 0.02); }
+  mutate() { this.play(660, 0.15, 'sine', 0.04); }
+  gameEnd() { this.play(880, 0.5, 'sine', 0.06); this.play(660, 0.5, 'sine', 0.04); }
+}
+
+const sound = new SoundEngine();
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -20,19 +58,19 @@ export default function Home() {
   const [round, setRound] = useState(1);
   const [cycle, setCycle] = useState(0);
   const [speed, setSpeed] = useState(1);
-  const [playerData, setPlayerData] = useState<{ name: string; territory: number; mp: number; color: number[] }[]>([]);
+  const [playerData, setPlayerData] = useState<{ name: string; territory: number; mp: number; color: number[]; surgePoints: number }[]>([]);
   const [humanMp, setHumanMp] = useState(5);
   const [humanMutations, setHumanMutations] = useState<Map<MutationId, number>>(new Map());
   const [showTutorial, setShowTutorial] = useState(true);
   const [winner, setWinner] = useState<string | null>(null);
   const [hoverCell, setHoverCell] = useState<number | null>(null);
   const [canvasSize, setCanvasSize] = useState(640);
-  const [showMutationPanel, setShowMutationPanel] = useState(false);
+  const [gameLogs, setGameLogs] = useState<string[]>([]);
+  const [muted, setMuted] = useState(false);
 
-  // Responsive canvas size
   useEffect(() => {
     const updateSize = () => {
-      const maxW = Math.min(window.innerWidth - 360, window.innerHeight - 100);
+      const maxW = Math.min(window.innerWidth - 380, window.innerHeight - 100);
       setCanvasSize(Math.max(320, Math.min(800, maxW)));
     };
     updateSize();
@@ -40,7 +78,8 @@ export default function Home() {
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
-  // Initialize game
+  useEffect(() => { sound.muted = muted; }, [muted]);
+
   const initGame = useCallback((humanX: number, humanY: number) => {
     const state = createInitialState();
     addPlayer(state, 'You', true);
@@ -69,15 +108,16 @@ export default function Home() {
       territory: p.territory,
       mp: p.mutationPoints,
       color: PLAYER_COLORS[p.id % PLAYER_COLORS.length].base,
+      surgePoints: p.surgePoints,
     })));
     const human = state.players[0];
     if (human) {
       setHumanMp(human.mutationPoints);
       setHumanMutations(new Map(human.mutations));
     }
+    setGameLogs([...state.log].reverse().slice(0, 50));
   };
 
-  // Handle canvas click for setup
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const state = stateRef.current;
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -104,13 +144,13 @@ export default function Home() {
     else setHoverCell(null);
   };
 
-  // Start round (from mutation phase)
   const startRound = () => {
     const state = stateRef.current;
     if (state.phase !== 'mutation') return;
     
     runAIMutations(state);
     activateSurges(state);
+    resetRoundStats(state);
     state.phase = 'growth';
     state.growthCycle = 0;
     syncUI(state);
@@ -127,10 +167,8 @@ export default function Home() {
       const ctx = canvasRef.current?.getContext('2d');
       if (!ctx) return;
 
-      // Render every frame
       renderBoard(ctx, state, canvasSize, hoverCell, null);
 
-      // Game logic at speed intervals
       if (state.phase === 'growth' && speed > 0) {
         const interval = 300 / speed;
         if (now - lastTickRef.current >= interval) {
@@ -138,26 +176,31 @@ export default function Home() {
 
           if (state.growthCycle < 5) {
             runGrowthCycle(state);
+            sound.growth();
             syncUI(state);
           } else {
-            // Decay phase
             state.phase = 'decay';
             runDecayPhase(state);
             earnMutationPoints(state);
             updateTerritories(state);
+
+            // Save snapshot for history
+            if (state.round % 3 === 0) {
+              state.history.push(snapshotBoard(state));
+            }
 
             if (checkEndgame(state)) {
               const w = determineWinner(state);
               state.winner = w;
               state.phase = 'ended';
               setWinner(state.players[w]?.name ?? 'Unknown');
+              sound.gameEnd();
               syncUI(state);
             } else {
               state.round++;
               state.phase = 'mutation';
               state.growthCycle = 0;
               syncUI(state);
-              // Auto-continue if not human's turn to spend points
               if (state.players[0]?.mutationPoints === 0) {
                 startRound();
               }
@@ -175,6 +218,7 @@ export default function Home() {
     const state = stateRef.current;
     const human = state.players[0];
     if (human && upgradeMutation(human, mutId, state.round)) {
+      sound.mutate();
       syncUI(state);
     }
   };
@@ -184,42 +228,104 @@ export default function Home() {
     return ((total / TOTAL_TILES) * 100).toFixed(1);
   };
 
+  // Group mutations by tier
+  const renderMutationPanel = () => {
+    const tiers: MutationTier[] = [1, 2, 3, 4, 5, 6, 7];
+    return (
+      <div className="space-y-1 max-h-[55vh] overflow-y-auto pr-1">
+        {tiers.map(tier => {
+          const tierMuts = MUTATIONS.filter(m => m.tier === tier);
+          const unlocked = isTierUnlocked(tier, round);
+          if (tierMuts.length === 0) return null;
+          return (
+            <div key={tier}>
+              <div
+                className="text-xs font-bold px-1 py-0.5 rounded-t flex items-center gap-1"
+                style={{
+                  color: unlocked ? TIER_COLORS[tier] : '#4B5563',
+                  borderLeft: `3px solid ${unlocked ? TIER_COLORS[tier] : '#374151'}`,
+                  backgroundColor: unlocked ? 'rgba(255,255,255,0.03)' : 'transparent',
+                }}
+              >
+                Tier {tier}
+                {!unlocked && <span className="text-gray-600 font-normal ml-1">(Round {tier * 3})</span>}
+                {unlocked && tier >= 3 && <span className="text-gray-600 font-normal ml-1">· {TIER_COLORS[tier]}</span>}
+              </div>
+              {unlocked && tierMuts.map(m => {
+                const lvl = humanMutations.get(m.id) ?? 0;
+                const canAfford = humanMp >= m.cost && lvl < m.maxLevel;
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => handleUpgrade(m.id)}
+                    disabled={!canAfford}
+                    className={`w-full text-left p-1.5 rounded text-xs transition-colors ${canAfford ? 'bg-gray-800 hover:bg-gray-700 cursor-pointer border-l-2' : 'bg-gray-900/50 text-gray-600 cursor-default border-l-2 border-gray-800'}`}
+                    style={canAfford ? { borderLeftColor: TIER_COLORS[m.tier] } : undefined}
+                  >
+                    <div className="flex justify-between items-center">
+                      <span className="truncate">{m.icon} {m.name}</span>
+                      <span className="text-gray-500 flex-shrink-0 ml-1">
+                        {lvl}/{m.maxLevel} · {m.cost}
+                        {m.isSurge && <span className="text-yellow-500 ml-0.5">⚡</span>}
+                      </span>
+                    </div>
+                    <div className="text-gray-500 mt-0.5 text-[10px] leading-tight">{m.description}</div>
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col lg:flex-row">
       {/* Sidebar */}
-      <div className="w-full lg:w-80 p-4 bg-gray-900 border-b lg:border-b-0 lg:border-r border-gray-800 flex flex-col gap-4 overflow-y-auto max-h-screen">
-        <h1 className="text-2xl font-bold text-amber-400 flex items-center gap-2">
-          🍞 Fungus Toast
-        </h1>
+      <div className="w-full lg:w-[340px] p-3 bg-gray-900 border-b lg:border-b-0 lg:border-r border-gray-800 flex flex-col gap-3 overflow-y-auto max-h-screen">
+        <div className="flex items-center justify-between">
+          <h1 className="text-xl font-bold text-amber-400 flex items-center gap-1">
+            🍞 Fungus Toast
+          </h1>
+          <button
+            onClick={() => setMuted(!muted)}
+            className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400"
+          >
+            {muted ? '🔇' : '🔊'}
+          </button>
+        </div>
 
         <div className="text-sm text-gray-400">
           Round {round} · Cycle {cycle}/5 · {occupiedPct()}% covered
         </div>
 
         {/* Players */}
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           {playerData.map((p, i) => (
             <div key={i} className="flex items-center gap-2 text-sm">
               <div
-                className="w-4 h-4 rounded-sm flex-shrink-0"
+                className="w-3 h-3 rounded-sm flex-shrink-0"
                 style={{ backgroundColor: `rgb(${p.color.join(',')})` }}
               />
-              <span className="flex-1">{p.name}</span>
-              <span className="text-gray-400">
+              <span className="flex-1 truncate">{p.name}</span>
+              <span className="text-gray-400 text-xs">
                 {((p.territory / TOTAL_TILES) * 100).toFixed(1)}%
               </span>
-              {i === 0 && <span className="text-amber-400 text-xs">{p.mp} MP</span>}
+              {i === 0 && (
+                <span className="text-amber-400 text-xs">{p.mp}MP ⚡{p.surgePoints}</span>
+              )}
             </div>
           ))}
         </div>
 
         {/* Speed Control */}
         <div className="flex gap-1">
-          {[0, 1, 2, 5].map(s => (
+          {[0, 1, 2, 5, 10].map(s => (
             <button
               key={s}
               onClick={() => setSpeed(s)}
-              className={`px-3 py-1 rounded text-sm ${speed === s ? 'bg-amber-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+              className={`px-2 py-1 rounded text-xs ${speed === s ? 'bg-amber-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
             >
               {s === 0 ? '⏸' : `${s}x`}
             </button>
@@ -231,40 +337,9 @@ export default function Home() {
           <div className="space-y-2">
             <div className="flex justify-between items-center">
               <h2 className="text-sm font-semibold text-amber-300">Mutations</h2>
-              <span className="text-xs text-amber-400">{humanMp} points</span>
+              <span className="text-xs text-amber-400">{humanMp} points · ⚡{playerData[0]?.surgePoints ?? 0} surge</span>
             </div>
-            <div className="space-y-1 max-h-[50vh] overflow-y-auto">
-              {([1,2,3,4,5,6,7] as MutationTier[]).map(tier => {
-                const tierMuts = MUTATIONS.filter(m => m.tier === tier);
-                const unlocked = isTierUnlocked(tier, round);
-                if (tierMuts.length === 0) return null;
-                return (
-                  <div key={tier}>
-                    <div className={`text-xs font-semibold px-1 py-0.5 ${unlocked ? 'text-amber-300' : 'text-gray-600'}`}>
-                      Tier {tier} {!unlocked && `(unlocks round ${tier * 3})`}
-                    </div>
-                    {unlocked && tierMuts.map(m => {
-                      const lvl = humanMutations.get(m.id) ?? 0;
-                      const canAfford = humanMp >= m.cost && lvl < m.maxLevel;
-                      return (
-                        <button
-                          key={m.id}
-                          onClick={() => handleUpgrade(m.id)}
-                          disabled={!canAfford}
-                          className={`w-full text-left p-2 rounded text-xs ${canAfford ? 'bg-gray-800 hover:bg-gray-700 cursor-pointer' : 'bg-gray-900 text-gray-600 cursor-default'}`}
-                        >
-                          <div className="flex justify-between">
-                            <span>{m.icon} {m.name}</span>
-                            <span className="text-gray-500">Lv{lvl}/{m.maxLevel} · {m.cost}MP</span>
-                          </div>
-                          <div className="text-gray-500 mt-0.5">{m.description}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                );
-              })}
-            </div>
+            {renderMutationPanel()}
             <button
               onClick={startRound}
               className="w-full py-2 bg-green-700 hover:bg-green-600 rounded text-sm font-semibold"
@@ -272,6 +347,20 @@ export default function Home() {
               ▶ Start Round
             </button>
           </div>
+        )}
+
+        {/* Game Log */}
+        {phase !== 'setup' && gameLogs.length > 0 && (
+          <details className="text-xs" open={phase === 'ended'}>
+            <summary className="text-amber-400 cursor-pointer hover:text-amber-300 font-semibold">
+              📋 Game Log ({gameLogs.length})
+            </summary>
+            <div className="mt-1 max-h-32 overflow-y-auto space-y-0.5 text-gray-500 bg-gray-800/30 rounded p-2">
+              {gameLogs.map((log, i) => (
+                <div key={i} className="leading-tight">{log}</div>
+              ))}
+            </div>
+          </details>
         )}
 
         {/* How to Play */}
@@ -285,30 +374,21 @@ export default function Home() {
               <div>
                 <span className="text-amber-300 font-semibold">🔄 Each Round:</span>
                 <ol className="list-decimal ml-4 mt-1 space-y-0.5">
-                  <li><b>Mutation Phase</b> — Spend your mutation points (MP) on upgrades, then click <span className="text-green-400">▶ Start Round</span></li>
-                  <li><b>Growth Phase</b> — 5 cycles run automatically. Your cells try to spread to empty neighbors</li>
-                  <li><b>Decay Phase</b> — Old cells may die. You earn MP based on your territory</li>
+                  <li><b>Mutation Phase</b> — Spend MP on upgrades, then click <span className="text-green-400">▶ Start Round</span></li>
+                  <li><b>Growth Phase</b> — 5 cycles run automatically</li>
+                  <li><b>Decay Phase</b> — Old cells die. You earn MP</li>
                 </ol>
               </div>
               <div>
-                <span className="text-amber-300 font-semibold">🧬 Mutations:</span>
-                <ul className="ml-4 mt-1 space-y-0.5">
-                  <li>🌱 <b>Mycelial Bloom</b> — Faster growth (best for beginners!)</li>
-                  <li>🛡️ <b>Homeostatic Harmony</b> — Cells resist decay longer</li>
-                  <li>☠️ <b>Mycotoxin Tracer</b> — Poison empty tiles to block enemies</li>
-                  <li>🧪 <b>Mutator Phenotype</b> — Earn more MP each round</li>
-                  <li>🌿 <b>Tendrils</b> — Grow diagonally (Tier 2)</li>
-                  <li>⚡ <b>Hyphal Surge</b> — Temporary growth bursts (Tier 2)</li>
-                  <li>🔰 <b>Chitin Fortification</b> — Make cells resistant (Tier 2)</li>
-                </ul>
+                <span className="text-amber-300 font-semibold">⚡ Surges:</span> Surge mutations activate when you accumulate enough surge points (from territory). They provide powerful temporary effects!
               </div>
               <div>
                 <span className="text-amber-300 font-semibold">💡 Tips:</span>
                 <ul className="ml-4 mt-1 space-y-0.5">
-                  <li>• Start near the center for maximum expansion room</li>
-                  <li>• Invest in Mycelial Bloom early — growth is king</li>
-                  <li>• Use speed controls (1x/2x/5x) to watch or fast-forward</li>
-                  <li>• Toxins block enemy growth — use them at borders</li>
+                  <li>• Start near the center for maximum room</li>
+                  <li>• Invest in Mycelial Bloom early</li>
+                  <li>• Use speed controls to watch or fast-forward</li>
+                  <li>• Surge mutations (⚡) activate automatically</li>
                 </ul>
               </div>
             </div>
@@ -319,8 +399,16 @@ export default function Home() {
         {winner && (
           <div className="p-4 bg-amber-900/30 border border-amber-700 rounded text-center">
             <div className="text-lg font-bold text-amber-300">🏆 {winner} Wins!</div>
-            <div className="text-sm text-gray-400 mt-1">
-              {playerData.map(p => `${p.name}: ${((p.territory / TOTAL_TILES) * 100).toFixed(1)}%`).join(' · ')}
+            <div className="text-sm text-gray-400 mt-1 space-y-0.5">
+              {playerData.map(p => (
+                <div key={p.name} className="flex items-center justify-center gap-2">
+                  <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: `rgb(${p.color.join(',')})` }} />
+                  <span>{p.name}: {((p.territory / TOTAL_TILES) * 100).toFixed(1)}%</span>
+                </div>
+              ))}
+            </div>
+            <div className="text-xs text-gray-500 mt-2">
+              Round {round} · {stateRef.current.history.length} snapshots saved
             </div>
             <button
               onClick={() => {
@@ -335,6 +423,7 @@ export default function Home() {
                 setPlayerData([]);
                 setHumanMp(5);
                 setHumanMutations(new Map());
+                setGameLogs([]);
               }}
               className="mt-2 px-4 py-1 bg-amber-700 hover:bg-amber-600 rounded text-sm"
             >
@@ -357,7 +446,7 @@ export default function Home() {
                 <div className="font-semibold text-amber-300">How it works:</div>
                 <ol className="list-decimal ml-4 space-y-1">
                   <li><b>Click the toast</b> to place your starting spore (tip: aim for the center!)</li>
-                  <li><b>Spend mutation points</b> on upgrades in the sidebar, then click <span className="text-green-400 font-semibold">▶ Start Round</span></li>
+                  <li><b>Spend mutation points</b> on upgrades, then click <span className="text-green-400 font-semibold">▶ Start Round</span></li>
                   <li><b>Watch your mold grow</b> — 5 growth cycles run automatically each round</li>
                   <li><b>Repeat</b> until the toast is 90% covered. Most territory wins!</li>
                 </ol>
