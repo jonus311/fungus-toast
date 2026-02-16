@@ -262,6 +262,47 @@ export default function Home() {
           </div>
         )}
 
+        {/* How to Play */}
+        {phase !== 'setup' && !winner && (
+          <details className="text-xs">
+            <summary className="text-amber-400 cursor-pointer hover:text-amber-300 font-semibold">📖 How to Play</summary>
+            <div className="mt-2 space-y-2 text-gray-400 bg-gray-800/50 rounded p-3">
+              <div>
+                <span className="text-amber-300 font-semibold">🎯 Goal:</span> Control the most territory when the toast is 90% covered (or after 75 rounds).
+              </div>
+              <div>
+                <span className="text-amber-300 font-semibold">🔄 Each Round:</span>
+                <ol className="list-decimal ml-4 mt-1 space-y-0.5">
+                  <li><b>Mutation Phase</b> — Spend your mutation points (MP) on upgrades, then click <span className="text-green-400">▶ Start Round</span></li>
+                  <li><b>Growth Phase</b> — 5 cycles run automatically. Your cells try to spread to empty neighbors</li>
+                  <li><b>Decay Phase</b> — Old cells may die. You earn MP based on your territory</li>
+                </ol>
+              </div>
+              <div>
+                <span className="text-amber-300 font-semibold">🧬 Mutations:</span>
+                <ul className="ml-4 mt-1 space-y-0.5">
+                  <li>🌱 <b>Mycelial Bloom</b> — Faster growth (best for beginners!)</li>
+                  <li>🛡️ <b>Homeostatic Harmony</b> — Cells resist decay longer</li>
+                  <li>☠️ <b>Mycotoxin Tracer</b> — Poison empty tiles to block enemies</li>
+                  <li>🧪 <b>Mutator Phenotype</b> — Earn more MP each round</li>
+                  <li>🌿 <b>Tendrils</b> — Grow diagonally (Tier 2)</li>
+                  <li>⚡ <b>Hyphal Surge</b> — Temporary growth bursts (Tier 2)</li>
+                  <li>🔰 <b>Chitin Fortification</b> — Make cells resistant (Tier 2)</li>
+                </ul>
+              </div>
+              <div>
+                <span className="text-amber-300 font-semibold">💡 Tips:</span>
+                <ul className="ml-4 mt-1 space-y-0.5">
+                  <li>• Start near the center for maximum expansion room</li>
+                  <li>• Invest in Mycelial Bloom early — growth is king</li>
+                  <li>• Use speed controls (1x/2x/5x) to watch or fast-forward</li>
+                  <li>• Toxins block enemy growth — use them at borders</li>
+                </ul>
+              </div>
+            </div>
+          </details>
+        )}
+
         {/* Winner */}
         {winner && (
           <div className="p-4 bg-amber-900/30 border border-amber-700 rounded text-center">
@@ -290,16 +331,21 @@ export default function Home() {
             <div className="bg-gray-900/90 border border-amber-700 rounded-lg p-6 max-w-md text-center pointer-events-auto">
               <h2 className="text-xl font-bold text-amber-400 mb-2">🍞 Welcome to Fungus Toast!</h2>
               <p className="text-sm text-gray-300 mb-3">
-                Compete to grow your mold colony across a piece of toast. Click anywhere on the
-                board to place your starting spore.
+                You are a mold colony competing against 3 AI opponents to dominate a piece of toast.
               </p>
-              <ul className="text-xs text-gray-400 text-left space-y-1 mb-3">
-                <li>🌱 <b>Grow</b> — cells spread to neighbors each round</li>
-                <li>💀 <b>Decay</b> — old cells die, making room for new growth</li>
-                <li>🧬 <b>Mutate</b> — spend points to upgrade your colony</li>
-                <li>🏆 <b>Win</b> — control the most territory when the toast is 90% covered</li>
-              </ul>
-              <p className="text-xs text-gray-500">Click the toast to begin!</p>
+              <div className="text-xs text-gray-400 text-left space-y-2 mb-4">
+                <div className="font-semibold text-amber-300">How it works:</div>
+                <ol className="list-decimal ml-4 space-y-1">
+                  <li><b>Click the toast</b> to place your starting spore (tip: aim for the center!)</li>
+                  <li><b>Spend mutation points</b> on upgrades in the sidebar, then click <span className="text-green-400 font-semibold">▶ Start Round</span></li>
+                  <li><b>Watch your mold grow</b> — 5 growth cycles run automatically each round</li>
+                  <li><b>Repeat</b> until the toast is 90% covered. Most territory wins!</li>
+                </ol>
+                <div className="mt-2 pt-2 border-t border-gray-700">
+                  <span className="text-amber-300 font-semibold">🧬 Starter tip:</span> Put your first points into <b>Mycelial Bloom</b> (faster growth) — it&apos;s the best early investment.
+                </div>
+              </div>
+              <p className="text-xs text-gray-500">👇 Click anywhere on the toast to begin!</p>
             </div>
           </div>
         )}
