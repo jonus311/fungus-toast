@@ -1,4 +1,4 @@
-export const BOARD_SIZE = 80;
+export const BOARD_SIZE = 160;
 export const TOTAL_TILES = BOARD_SIZE * BOARD_SIZE;
 export const BASE_GROWTH_CHANCE = 0.015;
 export const BASE_RANDOM_DECAY_CHANCE = 0.032;
