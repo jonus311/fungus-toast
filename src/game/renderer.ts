@@ -115,11 +115,11 @@ export function renderBoard(
         r = 0; g = 0; b = 0;
       }
 
-      // Fill pixels for this cell
+      // Fill pixels for this cell (use ceil for end to avoid 1px gaps between cells)
       const px = Math.floor(x * cellSize);
       const py = Math.floor(y * cellSize);
-      const pxEnd = Math.min(canvasSize, px + cellSizeI);
-      const pyEnd = Math.min(canvasSize, py + cellSizeI);
+      const pxEnd = Math.min(canvasSize, Math.ceil((x + 1) * cellSize));
+      const pyEnd = Math.min(canvasSize, Math.ceil((y + 1) * cellSize));
 
       for (let cy = py; cy < pyEnd; cy++) {
         const rowOff = cy * canvasSize * 4;
