@@ -312,9 +312,17 @@ export default function Home() {
             </div>
             <button
               onClick={() => {
-                stateRef.current = createInitialState();
+                const fresh = createInitialState();
+                fresh.phase = 'setup';
+                stateRef.current = fresh;
                 setWinner(null);
-                syncUI(stateRef.current);
+                setShowTutorial(true);
+                setPhase('setup');
+                setRound(1);
+                setCycle(0);
+                setPlayerData([]);
+                setHumanMp(5);
+                setHumanMutations(new Map());
               }}
               className="mt-2 px-4 py-1 bg-amber-700 hover:bg-amber-600 rounded text-sm"
             >
