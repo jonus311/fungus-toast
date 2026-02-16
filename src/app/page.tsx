@@ -345,7 +345,13 @@ export default function Home() {
                   <span className="text-amber-300 font-semibold">🧬 Starter tip:</span> Put your first points into <b>Mycelial Bloom</b> (faster growth) — it&apos;s the best early investment.
                 </div>
               </div>
-              <p className="text-xs text-gray-500">👇 Click anywhere on the toast to begin!</p>
+              <button
+                onClick={() => setShowTutorial(false)}
+                className="mt-2 px-6 py-2 bg-amber-600 hover:bg-amber-500 rounded font-semibold text-sm text-white"
+              >
+                🍞 Let&apos;s Go!
+              </button>
+              <p className="text-xs text-gray-500 mt-2">Then click anywhere on the toast to place your spore</p>
             </div>
           </div>
         )}
