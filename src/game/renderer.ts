@@ -64,8 +64,11 @@ export function renderBoard(
       let r: number, g: number, b: number, a = 255;
 
       if (cell.type === CellType.Empty) {
-        const distFromCenter = Math.hypot(x - BOARD_SIZE / 2, y - BOARD_SIZE / 2) / (BOARD_SIZE / 2);
-        const crust = Math.max(0, distFromCenter - 0.85) * 800;
+        // Square toast with edge crust darkening
+        const edgeX = Math.min(x, BOARD_SIZE - 1 - x) / (BOARD_SIZE / 2);
+        const edgeY = Math.min(y, BOARD_SIZE - 1 - y) / (BOARD_SIZE / 2);
+        const edgeDist = Math.min(edgeX, edgeY);
+        const crust = Math.max(0, (1 - edgeDist / 0.08)) * 80 * Math.max(0, 1 - edgeDist / 0.15);
         const base = 180 + n - crust - crumb;
         r = Math.min(255, Math.max(0, base + 32));
         g = Math.min(255, Math.max(0, base - 10));
