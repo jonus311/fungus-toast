@@ -52,7 +52,17 @@ export function renderBoard(
         ctx.fillStyle = `rgb(${r},${g},${b})`;
       } else if (cell.type === CellType.Dead) {
         const decay = Math.min(cell.age * 0.5, 30);
-        ctx.fillStyle = `rgb(${60 + n * 0.3 - decay},${50 + n * 0.3 - decay},${40 + n * 0.2})`;
+        // Tint dead cells with faded owner color
+        const deadOwner = cell.lastOwner >= 0 ? cell.lastOwner : cell.owner;
+        if (deadOwner >= 0) {
+          const color = PLAYER_COLORS[deadOwner % PLAYER_COLORS.length];
+          const r = Math.min(255, Math.max(0, color.dark[0] * 0.4 + 40 + n * 0.2 - decay));
+          const g = Math.min(255, Math.max(0, color.dark[1] * 0.4 + 35 + n * 0.2 - decay));
+          const b = Math.min(255, Math.max(0, color.dark[2] * 0.3 + 30 + n * 0.15));
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+        } else {
+          ctx.fillStyle = `rgb(${60 + n * 0.3 - decay},${50 + n * 0.3 - decay},${40 + n * 0.2})`;
+        }
       } else if (cell.type === CellType.Toxin) {
         const pulse = Math.sin(Date.now() * 0.005 + idx * 0.1) * 15;
         const color = PLAYER_COLORS[cell.owner % PLAYER_COLORS.length];

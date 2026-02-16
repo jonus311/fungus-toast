@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { BOARD_SIZE, MUTATIONS, MutationId, PLAYER_COLORS, TOTAL_TILES, CellType } from '@/game/constants';
+import { BOARD_SIZE, MUTATIONS, MutationId, PLAYER_COLORS, TOTAL_TILES, CellType, isTierUnlocked, MutationTier } from '@/game/constants';
 import {
   GameState, createInitialState, addPlayer, placeStartingSpore,
   runGrowthCycle, runDecayPhase, earnMutationPoints, updateTerritories,
@@ -174,7 +174,7 @@ export default function Home() {
   const handleUpgrade = (mutId: MutationId) => {
     const state = stateRef.current;
     const human = state.players[0];
-    if (human && upgradeMutation(human, mutId)) {
+    if (human && upgradeMutation(human, mutId, state.round)) {
       syncUI(state);
     }
   };
@@ -233,23 +233,35 @@ export default function Home() {
               <h2 className="text-sm font-semibold text-amber-300">Mutations</h2>
               <span className="text-xs text-amber-400">{humanMp} points</span>
             </div>
-            <div className="space-y-1 max-h-64 overflow-y-auto">
-              {MUTATIONS.map(m => {
-                const lvl = humanMutations.get(m.id) ?? 0;
-                const canAfford = humanMp >= m.cost && lvl < m.maxLevel;
+            <div className="space-y-1 max-h-[50vh] overflow-y-auto">
+              {([1,2,3,4,5,6,7] as MutationTier[]).map(tier => {
+                const tierMuts = MUTATIONS.filter(m => m.tier === tier);
+                const unlocked = isTierUnlocked(tier, round);
+                if (tierMuts.length === 0) return null;
                 return (
-                  <button
-                    key={m.id}
-                    onClick={() => handleUpgrade(m.id)}
-                    disabled={!canAfford}
-                    className={`w-full text-left p-2 rounded text-xs ${canAfford ? 'bg-gray-800 hover:bg-gray-700 cursor-pointer' : 'bg-gray-900 text-gray-600 cursor-default'}`}
-                  >
-                    <div className="flex justify-between">
-                      <span>{m.icon} {m.name}</span>
-                      <span className="text-gray-500">Lv{lvl} · {m.cost}MP</span>
+                  <div key={tier}>
+                    <div className={`text-xs font-semibold px-1 py-0.5 ${unlocked ? 'text-amber-300' : 'text-gray-600'}`}>
+                      Tier {tier} {!unlocked && `(unlocks round ${tier * 3})`}
                     </div>
-                    <div className="text-gray-500 mt-0.5">{m.description}</div>
-                  </button>
+                    {unlocked && tierMuts.map(m => {
+                      const lvl = humanMutations.get(m.id) ?? 0;
+                      const canAfford = humanMp >= m.cost && lvl < m.maxLevel;
+                      return (
+                        <button
+                          key={m.id}
+                          onClick={() => handleUpgrade(m.id)}
+                          disabled={!canAfford}
+                          className={`w-full text-left p-2 rounded text-xs ${canAfford ? 'bg-gray-800 hover:bg-gray-700 cursor-pointer' : 'bg-gray-900 text-gray-600 cursor-default'}`}
+                        >
+                          <div className="flex justify-between">
+                            <span>{m.icon} {m.name}</span>
+                            <span className="text-gray-500">Lv{lvl}/{m.maxLevel} · {m.cost}MP</span>
+                          </div>
+                          <div className="text-gray-500 mt-0.5">{m.description}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 );
               })}
             </div>

@@ -11,6 +11,7 @@ export const MAX_ROUNDS = 75;
 export const TOXIN_DURATION = 6;
 export const DECAY_SCALING_START_ROUND = 10;
 export const DECAY_ADDITIONAL_PER_ROUND = 0.001;
+export const SPORICIDAL_TOXIN_DURATION = 12;
 
 export enum CellType {
   Empty = 0,
@@ -20,26 +21,64 @@ export enum CellType {
 }
 
 export enum MutationId {
+  // Tier 1
   MycelialBloom = 'mycelialBloom',
   HomeostaticHarmony = 'homeostaticHarmony',
   MycotoxinTracer = 'mycotoxinTracer',
   MutatorPhenotype = 'mutatorPhenotype',
+  // Tier 2
   Tendrils = 'tendrils',
   HyphalSurge = 'hyphalSurge',
   ChitinFortification = 'chitinFortification',
+  // Tier 3
+  Necrosporulation = 'necrosporulation',
+  MycotropicInduction = 'mycotropicInduction',
+  PutrefactiveMycotoxin = 'putrefactiveMycotoxin',
+  AnabolicInversion = 'anabolicInversion',
+  MimeticResilience = 'mimeticResilience',
+  CompetitiveAntagonism = 'competitiveAntagonism',
+  // Tier 4
+  RegenerativeHyphae = 'regenerativeHyphae',
+  CreepingMold = 'creepingMold',
+  SporicidalBloom = 'sporicidalBloom',
+  NecrophyticBloom = 'necrophyticBloom',
+  // Tier 5
+  NecrohyphalInfiltration = 'necrohyphalInfiltration',
+  NecrotoxicConversion = 'necrotoxicConversion',
+  PutrefactiveRejuvenation = 'putrefactiveRejuvenation',
+  HyperadaptiveDrift = 'hyperadaptiveDrift',
+  // Tier 6
+  CatabolicRebirth = 'catabolicRebirth',
+  PutrefactiveCascade = 'putrefactiveCascade',
+  OntogenicRegression = 'ontogenicRegression',
+  // Tier 7
+  HypersystemicRegeneration = 'hypersystemicRegeneration',
 }
+
+export type MutationTier = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 export interface MutationDef {
   id: MutationId;
   name: string;
   description: string;
-  tier: 1 | 2;
+  tier: MutationTier;
   cost: number;
   maxLevel: number;
   icon: string;
 }
 
+export const TIER_COSTS: Record<number, number> = {
+  1: 1, 2: 2, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8,
+};
+
+// Tier unlocks at round >= tier * 3 (tier 1-2 always available)
+export function isTierUnlocked(tier: MutationTier, round: number): boolean {
+  if (tier <= 2) return true;
+  return round >= tier * 3;
+}
+
 export const MUTATIONS: MutationDef[] = [
+  // === Tier 1 ===
   {
     id: MutationId.MycelialBloom,
     name: 'Mycelial Bloom',
@@ -64,6 +103,7 @@ export const MUTATIONS: MutationDef[] = [
     description: '+0.1 mutation points earned per round per level',
     tier: 1, cost: 1, maxLevel: 10, icon: '🧬',
   },
+  // === Tier 2 ===
   {
     id: MutationId.Tendrils,
     name: 'Tendrils',
@@ -81,6 +121,119 @@ export const MUTATIONS: MutationDef[] = [
     name: 'Chitin Fortification',
     description: 'Some cells become resistant to decay for 3 rounds',
     tier: 2, cost: 2, maxLevel: 10, icon: '🏰',
+  },
+  // === Tier 3 ===
+  {
+    id: MutationId.Necrosporulation,
+    name: 'Necrosporulation',
+    description: '4% chance per level to spawn a spore on a random empty tile when a cell dies',
+    tier: 3, cost: 4, maxLevel: 5, icon: '🌀',
+  },
+  {
+    id: MutationId.MycotropicInduction,
+    name: 'Mycotropic Induction',
+    description: '+25% growth bonus per level near enemy cells',
+    tier: 3, cost: 4, maxLevel: 5, icon: '🧲',
+  },
+  {
+    id: MutationId.PutrefactiveMycotoxin,
+    name: 'Putrefactive Mycotoxin',
+    description: '1.5% chance per level for living cells to kill adjacent enemies',
+    tier: 3, cost: 4, maxLevel: 5, icon: '💀',
+  },
+  {
+    id: MutationId.AnabolicInversion,
+    name: 'Anabolic Inversion',
+    description: 'Earn bonus MP when your colony is smaller than others',
+    tier: 3, cost: 4, maxLevel: 3, icon: '📈',
+  },
+  {
+    id: MutationId.MimeticResilience,
+    name: 'Mimetic Resilience',
+    description: 'Surge: place resistant cells near enemies with board control advantage',
+    tier: 3, cost: 4, maxLevel: 3, icon: '🪞',
+  },
+  {
+    id: MutationId.CompetitiveAntagonism,
+    name: 'Competitive Antagonism',
+    description: 'Surge: toxins and blooms target larger colonies preferentially',
+    tier: 3, cost: 4, maxLevel: 5, icon: '⚔️',
+  },
+  // === Tier 4 ===
+  {
+    id: MutationId.RegenerativeHyphae,
+    name: 'Regenerative Hyphae',
+    description: '3% chance per level to reclaim your own dead cells',
+    tier: 4, cost: 5, maxLevel: 5, icon: '♻️',
+  },
+  {
+    id: MutationId.CreepingMold,
+    name: 'Creeping Mold',
+    description: '3.5% chance per level for cells to move to more open adjacent tiles',
+    tier: 4, cost: 5, maxLevel: 4, icon: '🐛',
+  },
+  {
+    id: MutationId.SporicidalBloom,
+    name: 'Sporicidal Bloom',
+    description: '8% of living cells per level drop toxins near enemies each round',
+    tier: 4, cost: 5, maxLevel: 5, icon: '💣',
+  },
+  {
+    id: MutationId.NecrophyticBloom,
+    name: 'Necrophytic Bloom',
+    description: 'When 20%+ board occupied, cell deaths spawn spores on random tiles',
+    tier: 4, cost: 5, maxLevel: 5, icon: '🍄',
+  },
+  // === Tier 5 ===
+  {
+    id: MutationId.NecrohyphalInfiltration,
+    name: 'Necrohyphal Infiltration',
+    description: '0.4% chance per level to convert adjacent dead enemy cells (cascades at 1.9%)',
+    tier: 5, cost: 6, maxLevel: 5, icon: '🕳️',
+  },
+  {
+    id: MutationId.NecrotoxicConversion,
+    name: 'Necrotoxic Conversion',
+    description: '4% chance per level to reclaim cells killed by your toxins',
+    tier: 5, cost: 6, maxLevel: 5, icon: '🔄',
+  },
+  {
+    id: MutationId.PutrefactiveRejuvenation,
+    name: 'Putrefactive Rejuvenation',
+    description: 'Toxin kills reduce age of nearby friendly cells by 4 cycles per level',
+    tier: 5, cost: 6, maxLevel: 4, icon: '💚',
+  },
+  {
+    id: MutationId.HyperadaptiveDrift,
+    name: 'Hyperadaptive Drift',
+    description: '28% chance per level for free higher-tier mutation upgrades',
+    tier: 5, cost: 6, maxLevel: 3, icon: '🎲',
+  },
+  // === Tier 6 ===
+  {
+    id: MutationId.CatabolicRebirth,
+    name: 'Catabolic Rebirth',
+    description: '12% chance per level to resurrect dead cells when nearby toxins expire',
+    tier: 6, cost: 7, maxLevel: 3, icon: '🔥',
+  },
+  {
+    id: MutationId.PutrefactiveCascade,
+    name: 'Putrefactive Cascade',
+    description: '22% chance per level for toxin kills to chain to adjacent enemies (max depth 10)',
+    tier: 6, cost: 7, maxLevel: 3, icon: '⛓️',
+  },
+  {
+    id: MutationId.OntogenicRegression,
+    name: 'Ontogenic Regression',
+    description: '30% chance per level to consume 3 Tier 1 levels for a free Tier 5-6 upgrade',
+    tier: 6, cost: 7, maxLevel: 3, icon: '🧪',
+  },
+  // === Tier 7 ===
+  {
+    id: MutationId.HypersystemicRegeneration,
+    name: 'Hypersystemic Regeneration',
+    description: '+1% per level boost to Regenerative Hyphae + 15% chance for resistant reclaimed cells',
+    tier: 7, cost: 8, maxLevel: 3, icon: '💎',
   },
 ];
 
