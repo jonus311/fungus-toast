@@ -475,7 +475,7 @@ export default function Home() {
         />
       </div>
       <div className="text-center mt-6 text-xs text-stone-500">
-        Based on <a href="https://github.com/jakeggordon/FungusToast-Unity" target="_blank" rel="noopener noreferrer" className="text-amber-600 hover:text-amber-400 underline">Fungus Toast</a> by Jacob Gordon
+        Based on <a href="https://github.com/jakejgordon/FungusToast" target="_blank" rel="noopener noreferrer" className="text-amber-600 hover:text-amber-400 underline">Fungus Toast</a> by Jacob Gordon
       </div>
     </div>
   );

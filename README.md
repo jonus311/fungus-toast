@@ -2,7 +2,7 @@
 
 A web-based strategy game of fungal domination. Grow your colony, mutate, and conquer the board.
 
-Based on [Fungus Toast](https://github.com/jakeggordon/FungusToast-Unity) by Jacob Gordon — originally a C#/Unity game, ported to the web with Next.js.
+Based on [Fungus Toast](https://github.com/jakejgordon/FungusToast) by Jacob Gordon — originally a C#/Unity game, ported to the web with Next.js.
 
 ---
 
